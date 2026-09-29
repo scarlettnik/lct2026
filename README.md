@@ -91,6 +91,11 @@ printf 'Готово: %s\n' "$OUTPUT_DIR"
 - `results/status-*.json` — последние статусы;
 - `results/variants-*.json` — оценки и инженерная валидация;
 - `results/result-2d.geojson`, `results/result-3d.geojson` — итоговые сети.
+- `results/result-2d-2d_1.geojson` и аналогичные — каждый вариант в отдельном файле.
+
+Каждый вариант можно получить как собственный `FeatureCollection` через
+`GET /api/v1/runs/{run_id}/variants/{variant_id}/export`; полный экспорт режима
+по-прежнему содержит все варианты.
 
 Для каждого режима скрипт требует три валидных варианта и отсутствие
 неподключённых ОКС. При нарушении проверок он завершается с ошибкой.
@@ -198,7 +203,8 @@ curl --fail-with-body -X POST \
 curl --fail-with-body "http://localhost:8080/api/v1/runs/${RUN_ID}"
 # Дождитесь status=DONE; при ERROR изучите поле error.
 curl --fail-with-body "http://localhost:8080/api/v1/runs/${RUN_ID}/variants"
-curl --fail-with-body "http://localhost:8080/api/v1/runs/${RUN_ID}/export" -o result.geojson
+curl --fail-with-body "http://localhost:8080/api/v1/runs/${RUN_ID}/export" -o result-all.geojson
+curl --fail-with-body "http://localhost:8080/api/v1/runs/${RUN_ID}/variants/2d_1/export" -o result-one.geojson
 ```
 
 ## Правила расчёта

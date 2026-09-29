@@ -62,7 +62,15 @@ public final class SparseVisibilityRouter {
     private final Map<GraphKey, GraphTemplate> staticGraphs = new HashMap<>();
     private final Map<String,Optional<LineString>> routesWithoutNewLines=new HashMap<>();
     private final Map<String,RouteAssessment> entryAssessments=new HashMap<>();
+    private final Map<String,List<Coordinate>> approachesByGoal=boundedGeometryCache();
+    private final Map<String,List<Coordinate>> escapesByGoal=boundedGeometryCache();
     private int staticGraphBuilds;
+
+    private static Map<String,List<Coordinate>> boundedGeometryCache() {
+        return new java.util.LinkedHashMap<String,List<Coordinate>>(64,.75f,true) {
+            @Override protected boolean removeEldestEntry(Map.Entry<String,List<Coordinate>> entry){return size()>4096;}
+        };
+    }
 
     public Optional<LineString> route(InputSnapshot snapshot, Point start, Point goal, int diameter,
                                       RunMode mode, List<LineString> occupied, long salt) {
@@ -161,6 +169,13 @@ public final class SparseVisibilityRouter {
     }
 
     private List<Coordinate> buildingApproaches(InputSnapshot snapshot,Point goal,int diameter) {
+        String cacheKey=goal.getX()+":"+goal.getY()+":"+diameter;
+        // Callers filter ports against the changing network, so return a separate list.
+        return new ArrayList<>(approachesByGoal.computeIfAbsent(cacheKey,
+                ignored->calculateBuildingApproaches(snapshot,goal,diameter)));
+    }
+
+    private List<Coordinate> calculateBuildingApproaches(InputSnapshot snapshot,Point goal,int diameter) {
         Map<String,Coordinate> approaches=new java.util.LinkedHashMap<>();
         double setback=buildingClearance(diameter)+RuleBook.byDn(diameter).pairWidth/2+.20;
         Coordinate terminal=goal.getCoordinate();
@@ -177,7 +192,7 @@ public final class SparseVisibilityRouter {
                     double distance=entry.distance(terminal);
                     if(distance>nearest+1e-6)continue;
                     if(distance>1e-8) {
-                        for(double offset:new double[]{.05,.5,1.5,setback}) {
+                        for(double offset:new double[]{setback}) {
                             Coordinate port=new Coordinate(entry.x+(entry.x-terminal.x)*offset/distance,
                                     entry.y+(entry.y-terminal.y)*offset/distance);
                             approaches.putIfAbsent(key(port),port);
@@ -200,6 +215,12 @@ public final class SparseVisibilityRouter {
     }
 
     private List<Coordinate> buildingEscapeNodes(InputSnapshot snapshot,Point goal,int diameter,List<Coordinate> ports) {
+        StringBuilder cacheKey=new StringBuilder().append(goal.getX()).append(':').append(goal.getY()).append(':').append(diameter);
+        for(Coordinate port:ports)cacheKey.append(':').append(port.x).append(':').append(port.y);
+        return escapesByGoal.computeIfAbsent(cacheKey.toString(),ignored->calculateBuildingEscapeNodes(snapshot,goal,diameter,ports));
+    }
+
+    private List<Coordinate> calculateBuildingEscapeNodes(InputSnapshot snapshot,Point goal,int diameter,List<Coordinate> ports) {
         List<Coordinate> result=new ArrayList<>();
         double clearance=buildingClearance(diameter)+RuleBook.byDn(diameter).pairWidth/2;
         for(InputSnapshot.Restriction owner:snapshot.restrictions) {
@@ -382,6 +403,8 @@ public final class SparseVisibilityRouter {
             staticGraphs.clear();
             routesWithoutNewLines.clear();
             entryAssessments.clear();
+            approachesByGoal.clear();
+            escapesByGoal.clear();
             staticGraphBuilds = 0;
         }
         return cachedConstraints;

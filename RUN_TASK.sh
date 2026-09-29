@@ -65,5 +65,15 @@ for mode in 2d 3d; do
   fi
   jq '[.features[].properties | select(.object_type == "variant_summary") | {variant_id, score, unconnected_oks_ids}]' \
     "$OUTPUT_DIR/result-$mode.geojson"
+  while IFS= read -r variant_id; do
+    [[ -n "$variant_id" ]] || continue
+    variant_file="$OUTPUT_DIR/result-$mode-$variant_id.geojson"
+    curl --fail-with-body --silent --show-error \
+      "$BASE_URL/runs/$run_id/variants/$variant_id/export" --output "$variant_file.part"
+    jq -e --arg variant "$variant_id" \
+      '.type == "FeatureCollection" and ([.features[].properties] as $p | ($p | length) > 0 and all($p[]; .variant_id == $variant) and ([ $p[] | select(.object_type == "variant_summary") ] | length) == 1)' \
+      "$variant_file.part" >/dev/null || fail "Некорректный GeoJSON для варианта $variant_id"
+    mv "$variant_file.part" "$variant_file"
+  done < <(jq -er '.[].variant_id' "$OUTPUT_DIR/variants-$mode.json")
 done
 printf 'Готово: %s\n' "$OUTPUT_DIR"

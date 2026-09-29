@@ -7,15 +7,27 @@ import java.util.*;
 public class PlanEvaluator {
     private final FlowDiameterCalculator fd = new FlowDiameterCalculator();
     private final SegmentCostModel costModel = new SegmentCostModel();
+    private InputSnapshot cachedSnapshot;
+    private final Map<LineCalculationKey,Double> constructionCosts = new LinkedHashMap<LineCalculationKey,Double>(256,.75f,true) {
+        @Override protected boolean removeEldestEntry(Map.Entry<LineCalculationKey,Double> entry) { return size()>8192; }
+    };
 
     public ReconstructionEvaluator.Result evaluate(InputSnapshot s, NetworkPlan p) {
+        if(cachedSnapshot!=s){cachedSnapshot=s;constructionCosts.clear();}
         Map<String,Double> flows = new HashMap<>();
         for (InputSnapshot.Terminal t:s.terminals) flows.put(t.oksId,t.flow);
         fd.apply(p,flows);
         p.constructionCost=0;p.newLength=0;
         for (PlanEdge e:p.edges) {
             e.cost=0;e.length=e.geometry.getLength();
-            for (CostedRouteSegment segment:costModel.splitAndCost(s,e,p.mode)) e.cost+=segment.cost;
+            // Flow determines DN above; cost itself depends on geometry, DN and mode.
+            LineCalculationKey key=new LineCalculationKey(e.geometry,e.dn,p.mode.ordinal());
+            Double cached=constructionCosts.get(key);
+            if(cached!=null)e.cost=cached;
+            else {
+                for(CostedRouteSegment segment:costModel.splitAndCost(s,e,p.mode))e.cost+=segment.cost;
+                constructionCosts.put(key,e.cost);
+            }
             p.constructionCost+=e.cost;p.newLength+=e.length;
         }
         p.tieInCost=p.roots.stream().filter(root->"heat_chamber".equals(root.existingObjectType))

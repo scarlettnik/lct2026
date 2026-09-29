@@ -16,19 +16,22 @@ public class UniversalOptimizer {
         SharedNetworkBuilder builder=new SharedNetworkBuilder(props);
         PlanEvaluator evaluator=new PlanEvaluator();
         EngineeringValidator validator=new EngineeringValidator();
+        JointPlanRefiner jointRefiner=new JointPlanRefiner();
+        JunctionRefiner junctionRefiner=new JunctionRefiner();
+        PlanLocalSearch localSearch=new PlanLocalSearch();
         List<NetworkPlan> candidates=new ArrayList<>();
-        int attempts=Math.max(6,Math.min(8,props.getOptimizer().getKPaths()));
+        int attempts=Math.max(3,Math.min(6,props.getOptimizer().getKPaths()+1));
         for(int seed=0;seed<attempts;seed++) {
             int salt=seed==0?0:seed+(int)Math.floorMod(props.getOptimizer().getRandomSeed(),10000);
             NetworkPlan plan=builder.build(snapshot,mode,salt);
-            new JunctionRefiner().improve(snapshot,plan);
-            plan=new JointPlanRefiner().improve(snapshot,plan);
+            junctionRefiner.improve(snapshot,plan);
+            plan=jointRefiner.improve(snapshot,plan);
             archive(snapshot,plan,seed,candidates,evaluator,validator);
             for(int round=0;round<(mode==RunMode.DEPTH?3:2);round++) {
                 double before=plan.score;
                 plan=builder.reconnectLeaves(snapshot,plan);
-                new PlanLocalSearch().improve(snapshot,plan,evaluator,validator);
-                plan=new JointPlanRefiner().improve(snapshot,plan);
+                localSearch.improve(snapshot,plan,evaluator,validator);
+                plan=jointRefiner.improve(snapshot,plan);
                 archive(snapshot,plan,seed,candidates,evaluator,validator);
                 if(plan.score>=before-1e-7)break;
             }

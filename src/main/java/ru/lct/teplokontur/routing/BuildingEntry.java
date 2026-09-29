@@ -3,6 +3,7 @@ package ru.lct.teplokontur.routing;
 import java.util.*;
 import org.locationtech.jts.geom.*;
 import org.locationtech.jts.linearref.LengthIndexedLine;
+import org.locationtech.jts.operation.distance.IndexedFacetDistance;
 
 /** Nearest exterior facade and the single approach leg at an indoor endpoint. */
 public final class BuildingEntry {
@@ -22,14 +23,20 @@ public final class BuildingEntry {
     }
 
     public static boolean nearestLead(Geometry building,LineString segment,Coordinate terminal) {
+        Geometry facade=exteriorBoundary(building);
+        return nearestLead(building,facade,new IndexedFacetDistance(facade),segment,terminal);
+    }
+
+    public static boolean nearestLead(Geometry building,Geometry facade,
+                                      IndexedFacetDistance facadeDistance,LineString segment,Coordinate terminal) {
         if(terminal==null||segment.getNumPoints()!=2)return false;
-        GeometryFactory gf=building.getFactory();
-        if(!building.covers(gf.createPoint(terminal)))return false;
         Coordinate a=segment.getCoordinateN(0),b=segment.getCoordinateN(1);
         Coordinate outside;
         if(a.distance(terminal)<EPS)outside=b;
         else if(b.distance(terminal)<EPS)outside=a;
         else return false;
+        GeometryFactory gf=building.getFactory();
+        if(!building.covers(gf.createPoint(terminal)))return false;
         if(building.covers(gf.createPoint(outside)))return false;
         Geometry inside=segment.intersection(building);
         if(inside.isEmpty()||inside.getNumGeometries()!=1)return false;
@@ -38,17 +45,28 @@ public final class BuildingEntry {
         if(lead[0].distance(terminal)<EPS)entry=lead[lead.length-1];
         else if(lead[lead.length-1].distance(terminal)<EPS)entry=lead[0];
         else return false;
-        Geometry facade=exteriorBoundary(building);
-        double nearest=facade.distance(gf.createPoint(terminal));
+        double nearest=facadeDistance.distance(gf.createPoint(terminal));
         return facade.distance(gf.createPoint(entry))<=EPS
                 &&Math.abs(inside.getLength()-nearest)<=EPS;
     }
 
     public static boolean approach(Geometry building,LineString segment,Coordinate port,
                                    Coordinate terminal,double clearance) {
+        Geometry facade=exteriorBoundary(building);
+        return approach(building,facade,new IndexedFacetDistance(facade),building.buffer(clearance),segment,port,terminal);
+    }
+
+    public static boolean approach(Geometry building,Geometry facade,IndexedFacetDistance facadeDistance,
+                                   Geometry envelope,LineString segment,Coordinate port,Coordinate terminal) {
         if(port==null||terminal==null)return false;
         GeometryFactory gf=building.getFactory();
-        if(!nearestLead(building,gf.createLineString(new Coordinate[]{port,terminal}),terminal))return false;
+        if(!nearestLead(building,facade,facadeDistance,gf.createLineString(new Coordinate[]{port,terminal}),terminal))return false;
+        return approachFromVerifiedPort(building,envelope,segment,port);
+    }
+
+    /** The caller has already verified the unchanged port-to-terminal lead. */
+    static boolean approachFromVerifiedPort(Geometry building,Geometry envelope,LineString segment,Coordinate port) {
+        GeometryFactory gf=building.getFactory();
         Coordinate a=segment.getCoordinateN(0),b=segment.getCoordinateN(segment.getNumPoints()-1);
         Coordinate outside;
         if(a.distance(port)<EPS)outside=b;
@@ -56,7 +74,6 @@ public final class BuildingEntry {
         else return false;
         LineString outward=gf.createLineString(new Coordinate[]{port,outside});
         if(outward.getLength()<EPS||outward.intersection(building).getLength()>EPS)return false;
-        Geometry envelope=building.buffer(clearance);
         List<double[]> intervals=new ArrayList<>();
         collectIntervals(outward.intersection(envelope),new LengthIndexedLine(outward),intervals);
         if(intervals.isEmpty())return true;

@@ -14,10 +14,20 @@ public final class JointPlanRefiner {
     private final PlanEvaluator evaluator = new PlanEvaluator();
     private final EngineeringValidator validator = new EngineeringValidator();
     private final SegmentCostModel costs = new SegmentCostModel();
+    private InputSnapshot cachedSnapshot;
+    private RouteConstraintEngine cachedConstraints;
+    private final Map<LineCalculationKey,Double> routeCosts = new LinkedHashMap<LineCalculationKey,Double>(256,.75f,true) {
+        @Override protected boolean removeEldestEntry(Map.Entry<LineCalculationKey,Double> entry) { return size()>32768; }
+    };
 
     public NetworkPlan improve(InputSnapshot snapshot, NetworkPlan initial) {
         NetworkPlan best = initial;
-        RouteConstraintEngine constraints = new RouteConstraintEngine(snapshot);
+        if(cachedSnapshot!=snapshot) {
+            cachedSnapshot=snapshot;
+            cachedConstraints=new RouteConstraintEngine(snapshot);
+            routeCosts.clear();
+        }
+        RouteConstraintEngine constraints = cachedConstraints;
         for (double step : new double[]{48,24,12,6,3,1}) {
             for (int pass=0; pass<3; pass++) {
                 NetworkPlan next = round(snapshot,best,constraints,step);
@@ -53,7 +63,7 @@ public final class JointPlanRefiner {
                 LineString shaped=gf.createLineString(coords);
                 LineString direct=gf.createLineString(new Coordinate[]{from.getCoordinate(),to.getCoordinate()});
                 double shapedCost=legalCost(s,plan,edge,shaped,constraints);
-                double directCost=legalCost(s,plan,edge,direct,constraints);
+                double directCost=coords.length==2?shapedCost:legalCost(s,plan,edge,direct,constraints);
                 lines[i][j]=directCost<shapedCost?direct:shaped;
                 matrix[i][j]=Math.min(shapedCost,directCost);
             }
@@ -108,6 +118,15 @@ public final class JointPlanRefiner {
     }
 
     private double legalCost(InputSnapshot s,NetworkPlan plan,PlanEdge edge,LineString line,RouteConstraintEngine constraints) {
+        LineCalculationKey key=new LineCalculationKey(line,edge.dn,plan.mode.ordinal(),edge.child.kind==NodeKind.TERMINAL?1:0);
+        Double cached=routeCosts.get(key);
+        if(cached!=null)return cached;
+        double value=calculateLegalCost(s,plan,edge,line,constraints);
+        routeCosts.put(key,value);
+        return value;
+    }
+
+    private double calculateLegalCost(InputSnapshot s,NetworkPlan plan,PlanEdge edge,LineString line,RouteConstraintEngine constraints) {
         if(line.getLength()<.05)return Double.POSITIVE_INFINITY;
         Coordinate[] c=line.getCoordinates();
         for(int i=0;i<c.length-1;i++) {
