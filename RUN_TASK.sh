@@ -36,6 +36,7 @@ scenario_id="$(jq -er 'select(.status == "READY") | .scenario_id' "$OUTPUT_DIR/s
 printf 'Сценарий: %s\n' "$scenario_id"
 
 for mode in 2d 3d; do
+  calculation_started=$SECONDS
   curl --fail-with-body --silent --show-error -X POST "$BASE_URL/scenarios/$scenario_id/runs?mode=$mode" \
     --output "$OUTPUT_DIR/run-$mode.json"
   run_id="$(jq -er '.run_id' "$OUTPUT_DIR/run-$mode.json")"
@@ -52,6 +53,7 @@ for mode in 2d 3d; do
     sleep "$POLL_SECONDS"
   done
   [[ "$status" == DONE ]] || fail "Расчёт $mode ещё не завершён; run_id=$run_id. Увеличьте MAX_POLLS."
+  printf '[%s] Расчёт завершён за %s с (включая ожидание опроса)\n' "$mode" "$((SECONDS-calculation_started))"
   curl --fail-with-body --silent --show-error "$BASE_URL/runs/$run_id/variants" \
     --output "$OUTPUT_DIR/variants-$mode.json"
   jq -e --argjson minimum "$MIN_VARIANTS" \

@@ -17,8 +17,10 @@ public final class SharedNetworkBuilder {
     private final TieCandidateGenerator ties;
     private final PlanEvaluator evaluator = new PlanEvaluator();
     private final EngineeringValidator validator = new EngineeringValidator();
+    private final int initialCandidates;
+    private final int acceptedCandidates;
 
-    public SharedNetworkBuilder(CompetitionProperties props) { ties = new TieCandidateGenerator(props); }
+    public SharedNetworkBuilder(CompetitionProperties props) { ties = new TieCandidateGenerator(props);initialCandidates=Math.max(1,props.getOptimizer().getTieCandidates());acceptedCandidates=props.getOptimizer().isRefine()?3:1; }
 
     public NetworkPlan build(InputSnapshot snapshot, RunMode mode) { return build(snapshot,mode,0); }
 
@@ -30,8 +32,8 @@ public final class SharedNetworkBuilder {
         evaluator.evaluate(snapshot, plan);
         Map<String, List<TieCandidate>> roots = new LinkedHashMap<>();
         for (InputSnapshot.Terminal terminal : snapshot.terminals)
-            roots.put(terminal.oksId, ties.generate(snapshot, terminal, 24, seed));
-        int candidateLimit=24;
+            roots.put(terminal.oksId, ties.generate(snapshot, terminal, initialCandidates, seed));
+        int candidateLimit=initialCandidates;
         while (!plan.unconnected.isEmpty()) {
             NetworkPlan best = null;
             double bestIncrement = Double.POSITIVE_INFINITY;
@@ -55,7 +57,7 @@ public final class SharedNetworkBuilder {
                     if (!candidate.validation.passed) continue;
                     double increment = candidate.score - current.score + .7 * RuleBook.unconnectedPenalty(terminal.flow) / 25_000_000.0;
                     if (increment < bestIncrement) { best = candidate; bestIncrement = increment; }
-                    if (++accepted >= 3) break;
+                    if (++accepted >= acceptedCandidates) break;
                 }
                 if (best != null) break;
             }
@@ -63,7 +65,7 @@ public final class SharedNetworkBuilder {
                 // A blocked nearest tie does not make the terminal unreachable.
                 // Expand the search only after the inexpensive candidates fail.
                 if(candidateLimit==Integer.MAX_VALUE)break;
-                candidateLimit=candidateLimit==24?96:Integer.MAX_VALUE;
+                candidateLimit=candidateLimit<96?Math.min(96,candidateLimit*4):Integer.MAX_VALUE;
                 for(InputSnapshot.Terminal terminal:pending)
                     roots.put(terminal.oksId,ties.generate(snapshot,terminal,candidateLimit,seed));
                 continue;

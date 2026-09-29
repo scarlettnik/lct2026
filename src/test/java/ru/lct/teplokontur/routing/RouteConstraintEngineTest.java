@@ -107,6 +107,29 @@ class RouteConstraintEngineTest {
     }
 
     @Test
+    void acceptsAnExplicitFallbackWallButStillRejectsItWithoutFallbackSelection() {
+        InputSnapshot snapshot=new InputSnapshot(1);
+        InputSnapshot.Restriction building=new InputSnapshot.Restriction();
+        building.id="fallback-building";building.type="oks_existing";
+        building.geometry=geometryFactory.createPolygon(new Coordinate[]{new Coordinate(0,0),
+                new Coordinate(30,0),new Coordinate(30,20),new Coordinate(0,20),new Coordinate(0,0)});
+        snapshot.restrictions.add(building);
+        Coordinate terminal=new Coordinate(28,10);
+        Coordinate northPort=new Coordinate(28,26);
+        RouteConstraintEngine constraints=new RouteConstraintEngine(snapshot);
+
+        for(RunMode mode:RunMode.values()) {
+            LineString fallback=line(28,26,28,10);
+            assertFalse(constraints.assess(fallback,100,Collections.emptyList(),null,mode,terminal).feasible,
+                    "A farther wall must not be accepted unless nearer walls were proved unreachable");
+            assertTrue(constraints.assess(fallback,100,Collections.emptyList(),null,mode,terminal,northPort).feasible,
+                    "The explicitly selected next-nearest wall must be accepted when its lead is straight");
+            assertTrue(constraints.assess(line(20,26,28,10),100,Collections.emptyList(),null,mode,terminal,
+                    new Coordinate(20,26)).feasible,"A selected straight fallback lead need not be perpendicular to its wall");
+        }
+    }
+
+    @Test
     void usesTheExternalFacadeInsteadOfAClosedCourtyardHole() {
         InputSnapshot snapshot=new InputSnapshot(1);
         InputSnapshot.Restriction building=new InputSnapshot.Restriction();building.id="courtyard";building.type="oks_existing";

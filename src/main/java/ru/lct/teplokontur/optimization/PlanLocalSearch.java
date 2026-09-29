@@ -6,6 +6,7 @@ import org.locationtech.jts.geom.LineString;
 import ru.lct.teplokontur.domain.InputSnapshot;
 import ru.lct.teplokontur.domain.NetworkPlan;
 import ru.lct.teplokontur.domain.PlanEdge;
+import ru.lct.teplokontur.domain.ValidationReport;
 import ru.lct.teplokontur.engineering.PlanEvaluator;
 import ru.lct.teplokontur.validation.EngineeringValidator;
 
@@ -40,6 +41,7 @@ public final class PlanLocalSearch {
             }
 
             LineString original = edge.geometry;
+            ValidationReport originalValidation = plan.validation;
             edge.geometry = direct;
             evaluator.evaluate(snapshot, plan);
             plan.validation = validator.validate(snapshot, plan);
@@ -51,7 +53,7 @@ public final class PlanLocalSearch {
 
             edge.geometry = original;
             evaluator.evaluate(snapshot, plan);
-            plan.validation = validator.validate(snapshot, plan);
+            plan.validation = originalValidation;
         }
         return changed;
     }

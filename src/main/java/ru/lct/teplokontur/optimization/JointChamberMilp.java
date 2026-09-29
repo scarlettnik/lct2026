@@ -46,7 +46,7 @@ public final class JointChamberMilp {
         List<Assignment> result = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         for (Solution solution : all) {
-            String signature = signature(solution.selected);
+            String signature = solution.signature();
             if (seen.add(signature)) {
                 result.add(new Assignment(solution.cost, solution.selected));
             }
@@ -245,12 +245,13 @@ public final class JointChamberMilp {
 
     private static final Comparator<Solution> SOLUTION_ORDER = (left, right) -> {
         int byCost = Double.compare(left.cost, right.cost);
-        return byCost != 0 ? byCost : signature(left.selected).compareTo(signature(right.selected));
+        return byCost != 0 ? byCost : left.signature().compareTo(right.signature());
     };
 
     private static final class Solution {
         private final double cost;
         private final Map<Integer, Integer> selected;
+        private String cachedSignature;
 
         private Solution(double cost, Map<Integer, Integer> selected) {
             this.cost = cost;
@@ -264,7 +265,14 @@ public final class JointChamberMilp {
         }
 
         Solution plus(double value) {
-            return new Solution(cost + value, selected);
+            Solution result=new Solution(cost + value, selected);
+            result.cachedSignature=cachedSignature;
+            return result;
+        }
+
+        private String signature() {
+            if(cachedSignature==null)cachedSignature=JointChamberMilp.signature(selected);
+            return cachedSignature;
         }
     }
 

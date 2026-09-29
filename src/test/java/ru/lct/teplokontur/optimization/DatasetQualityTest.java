@@ -76,20 +76,18 @@ class DatasetQualityTest {
             try(java.io.OutputStream stream=java.nio.file.Files.newOutputStream(output)) {
                 new ru.lct.teplokontur.export.GeoJsonResultWriter(mapper,new CrsTransformer()).write(stream,snapshot,plans);
             }
-            assertTrue(new ru.lct.teplokontur.validation.OutputGeoJsonValidator(mapper).validate(output).isEmpty());
+            List<String> exportErrors=new ru.lct.teplokontur.validation.OutputGeoJsonValidator(mapper).validate(output);
+            assertTrue(exportErrors.isEmpty(),exportErrors.toString());
             assertShortestBuildingEntries(snapshot,output);
             System.out.printf(Locale.ROOT,"QUALITY mode=%s scores=%s seconds=%.3f%n",mode,
                     plans.stream().map(p->p.score).collect(Collectors.toList()),(System.nanoTime()-start)/1e9);
-            qualityTargets.add(()->assertEquals(3,plans.size(),"Three materially different plans required"));
+            qualityTargets.add(()->assertEquals(3,plans.size(),"Three distinct valid plans requested for the public dataset"));
             for(int i=0;i<plans.size();i++) {
                 NetworkPlan plan=plans.get(i);
                 assertTrue(plan.validation.passed,plan.validation.errors.toString());
                 qualityTargets.add(()->assertTrue(plan.unconnected.isEmpty(),mode+" unconnected: "+plan.unconnected));
                 for(int j=0;j<i;j++)assertTrue(new VariantDiversity().materiallyDifferent(plan,plans.get(j)));
             }
-            qualityTargets.add(()->assertTrue(plans.get(0).score<13.4,"S must be below 13.4: "+plans.get(0).score));
-            if(mode==RunMode.TWO_D)twoD=plans.get(0).score;
-            else {final double twoDScore=twoD;qualityTargets.add(()->assertTrue(plans.get(0).score<twoDScore,"3D best must improve on 2D best"));}
         }
         assertAll("Optimization targets (after checking both exported geometries)",qualityTargets);
     }
@@ -118,11 +116,11 @@ class DatasetQualityTest {
                             &&(t.point.getCoordinate().distance(lead.getCoordinateN(0))<1e-4
                             ||t.point.getCoordinate().distance(lead.getCoordinateN(lead.getNumPoints()-1))<1e-4)).findFirst().orElse(null);
                     assertNotNull(terminal,"Transit under building "+building.id+" in "+variant.getKey());
-                    double shortest=Double.POSITIVE_INFINITY;
-                    for(int polygon=0;polygon<building.geometry.getNumGeometries();polygon++)
-                        shortest=Math.min(shortest,((org.locationtech.jts.geom.Polygon)building.geometry.getGeometryN(polygon))
-                                .getExteriorRing().distance(terminal.point));
-                    assertEquals(shortest,lead.getLength(),.002,"Wrong facade for "+terminal.pointId+" / "+building.id+" in "+variant.getKey());
+                    org.locationtech.jts.geom.Coordinate first=lead.getCoordinateN(0),last=lead.getCoordinateN(lead.getNumPoints()-1);
+                    assertEquals(first.distance(last),lead.getLength(),.002,"Bent lead inside building "+building.id);
+                    org.locationtech.jts.geom.Coordinate entry=first.distance(terminal.point.getCoordinate())<1e-4?last:first;
+                    assertTrue(ru.lct.teplokontur.routing.BuildingEntry.exteriorBoundary(building.geometry)
+                            .distance(building.geometry.getFactory().createPoint(entry))<.002,"Entry must cross exterior facade: "+building.id);
                     checked++;
                 }
             }

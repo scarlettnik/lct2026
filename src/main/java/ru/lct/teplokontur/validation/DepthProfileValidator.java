@@ -8,10 +8,19 @@ import ru.lct.teplokontur.engineering.SegmentCostModel;
 
 /** Independently checks slopes, normal node depth, crossing plateaus and clearance. */
 final class DepthProfileValidator {
+    private final SegmentCostModel costs=new SegmentCostModel();
+    private InputSnapshot cachedSnapshot;
+    private final Map<LineCalculationKey,Boolean> validProfiles=new LinkedHashMap<LineCalculationKey,Boolean>(256,.75f,true) {
+        @Override protected boolean removeEldestEntry(Map.Entry<LineCalculationKey,Boolean> entry){return size()>8192;}
+    };
     void validate(InputSnapshot snapshot,NetworkPlan plan,ValidationReport report) {
         if(plan.mode!=RunMode.DEPTH)return;
+        if(cachedSnapshot!=snapshot){cachedSnapshot=snapshot;validProfiles.clear();}
         for(PlanEdge edge:plan.edges) {
-            List<CostedRouteSegment> segments=new SegmentCostModel().splitAndCost(snapshot,edge,plan.mode);
+            LineCalculationKey key=new LineCalculationKey(edge.geometry,edge.dn);
+            if(validProfiles.containsKey(key))continue;
+            int errorsBefore=report.errors.size();
+            List<CostedRouteSegment> segments=costs.splitAndCost(snapshot,edge,plan.mode);
             if(segments.isEmpty()){report.error("Empty depth profile: "+edge.id);continue;}
             if(Math.abs(segments.get(0).depthStart-3)>1e-6||Math.abs(segments.get(segments.size()-1).depthEnd-3)>1e-6)
                 report.error("Depth profile does not return to normal node depth: "+edge.id);
@@ -34,6 +43,7 @@ final class DepthProfileValidator {
             }
             for(InputSnapshot.ExistingEdge existing:snapshot.network)
                 checkCrossings(edge,existing.geometry,3,RuleBook.byDn(existing.dn).pairHeight,.5,segments,report);
+            if(report.errors.size()==errorsBefore)validProfiles.put(key,Boolean.TRUE);
         }
     }
 

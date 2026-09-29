@@ -17,8 +17,11 @@ import org.locationtech.jts.geom.LineString;
 import org.locationtech.jts.geom.LineSegment;
 import org.locationtech.jts.geom.GeometryComponentFilter;
 import org.locationtech.jts.geom.Point;
+import org.locationtech.jts.algorithm.RobustLineIntersector;
+import org.locationtech.jts.index.strtree.STRtree;
 import ru.lct.teplokontur.domain.DnSpec;
 import ru.lct.teplokontur.domain.InputSnapshot;
+import ru.lct.teplokontur.domain.LineCalculationKey;
 import ru.lct.teplokontur.domain.RestrictionRule;
 import ru.lct.teplokontur.domain.RestrictionRules;
 import ru.lct.teplokontur.domain.RunMode;
@@ -42,6 +45,7 @@ public final class SparseVisibilityRouter {
     private static final int ATTEMPTS_PER_SECTOR = 6;
     /** A meaningful bend carries an eight-metre equivalent routing cost. */
     private static final double BEND_PENALTY_METERS = 8.0;
+    private static final double ENTRY_DISTANCE_EPS = 1e-5;
     private static final double[] CORRIDOR_PADDING_METERS = {120.0, 360.0, 720.0};
     private final GeometryFactory geometryFactory = new GeometryFactory();
     /**
@@ -64,6 +68,17 @@ public final class SparseVisibilityRouter {
     private final Map<String,RouteAssessment> entryAssessments=new HashMap<>();
     private final Map<String,List<Coordinate>> approachesByGoal=boundedGeometryCache();
     private final Map<String,List<Coordinate>> escapesByGoal=boundedGeometryCache();
+    private final Map<Geometry,BuildingEntry.Area> buildingAreas=new java.util.IdentityHashMap<>();
+    private final Map<String,Geometry> escapeEnvelopes=new HashMap<>();
+    private final Map<LineCalculationKey,Double> leadDistances=new java.util.LinkedHashMap<LineCalculationKey,Double>(64,.75f,true) {
+        @Override protected boolean removeEldestEntry(Map.Entry<LineCalculationKey,Double> entry){return size()>8192;}
+    };
+    private final ru.lct.teplokontur.engineering.SegmentCostModel depthCosts=new ru.lct.teplokontur.engineering.SegmentCostModel();
+    private List<LineCalculationKey> occupiedKeys=Collections.emptyList();
+    private STRtree occupiedSegments=new STRtree();
+    private final Map<LineCalculationKey,Boolean> occupiedAssessments=new java.util.LinkedHashMap<LineCalculationKey,Boolean>(256,.75f,true) {
+        @Override protected boolean removeEldestEntry(Map.Entry<LineCalculationKey,Boolean> entry){return size()>32768;}
+    };
     private int staticGraphBuilds;
 
     private static Map<String,List<Coordinate>> boundedGeometryCache() {
@@ -75,6 +90,7 @@ public final class SparseVisibilityRouter {
     public Optional<LineString> route(InputSnapshot snapshot, Point start, Point goal, int diameter,
                                       RunMode mode, List<LineString> occupied, long salt) {
         constraintsFor(snapshot);
+        prepareOccupied(occupied);
         String cacheKey=start.getX()+":"+start.getY()+":"+goal.getX()+":"+goal.getY()+":"+diameter+":"+mode;
         Optional<LineString> baseline=routesWithoutNewLines.computeIfAbsent(cacheKey,
                 key->search(snapshot,start,goal,diameter,mode,Collections.emptyList()));
@@ -103,16 +119,51 @@ public final class SparseVisibilityRouter {
             return Optional.of(geometryFactory.createLineString(new Coordinate[] {source, target}));
         }
 
-        List<Coordinate> approaches=buildingApproaches(snapshot,goal,diameter);
-        approaches.removeIf(port->!legal(constraints,port,target,diameter,occupied,source,mode,target));
-        boolean indoor=snapshot.restrictions.stream().anyMatch(r->"oks_existing".equals(r.type)&&r.geometry.covers(goal));
-        if(indoor&&approaches.isEmpty())return Optional.empty();
+        boolean indoor=snapshot.restrictions.stream().anyMatch(r->ownsGoal(r,goal));
+        if(indoor) {
+            List<Coordinate> approaches=buildingApproaches(snapshot,goal,diameter);
+            approaches.removeIf(port->!legal(constraints,port,target,diameter,occupied,source,mode,target,port));
+            if(approaches.isEmpty())return Optional.empty();
+            approaches.sort(Comparator.comparingDouble((Coordinate port)->buildingLeadDistance(snapshot,goal,port))
+                    .thenComparingDouble(port->port.distance(target))
+                    .thenComparingDouble(port->port.x).thenComparingDouble(port->port.y));
+            for(int from=0;from<approaches.size();) {
+                double distance=buildingLeadDistance(snapshot,goal,approaches.get(from));
+                int to=from+1;
+                while(to<approaches.size()&&Math.abs(buildingLeadDistance(snapshot,goal,approaches.get(to))-distance)<=ENTRY_DISTANCE_EPS)to++;
+                LineString directEntry=null;
+                double bestEntryCost=Double.POSITIVE_INFINITY;
+                for(Coordinate port:approaches.subList(from,to)) {
+                    if(reverses(source,port,target))continue;
+                    RouteAssessment approach=constraints.assess(line(source,port),diameter,occupied,source,mode,target,port);
+                    if(!approach.feasible)continue;
+                    LineString entry=geometryFactory.createLineString(new Coordinate[]{source,port,target});
+                    if(!depthFeasible(snapshot,entry,diameter,mode))continue;
+                    double cost=source.distance(port)*approach.multiplier+port.distance(target);
+                    if(cost<bestEntryCost){directEntry=entry;bestEntryCost=cost;}
+                }
+                if(directEntry!=null)return Optional.of(directEntry);
+                Optional<LineString> candidate=searchWithApproaches(snapshot,start,goal,diameter,mode,occupied,
+                        graphDiameter,new ArrayList<>(approaches.subList(from,to)),true);
+                if(candidate.isPresent())return candidate;
+                from=to;
+            }
+            return Optional.empty();
+        }
+        return searchWithApproaches(snapshot,start,goal,diameter,mode,occupied,graphDiameter,
+                Collections.emptyList(),false);
+    }
 
+    private Optional<LineString> searchWithApproaches(InputSnapshot snapshot,Point start,Point goal,int diameter,
+                                                       RunMode mode,List<LineString> occupied,int graphDiameter,
+                                                       List<Coordinate> approaches,boolean indoor) {
+        RouteConstraintEngine constraints=constraintsFor(snapshot);
+        Coordinate source=start.getCoordinate(),target=goal.getCoordinate();
         GraphTemplate template = staticGraphFor(snapshot, graphDiameter, mode);
         List<Coordinate> nodes = new ArrayList<>(template.nodes.size() + 2);
         nodes.add(new Coordinate(source));
         nodes.add(new Coordinate(target));
-        for (Coordinate node : template.nodes) nodes.add(new Coordinate(node));
+        nodes.addAll(template.nodes); // Coordinates are read-only throughout graph search.
         int firstEntry=nodes.size();
         nodes.addAll(approaches);
         int afterEntry=nodes.size();
@@ -136,14 +187,16 @@ public final class SparseVisibilityRouter {
             addEdge(graph, endpointAssessments, nodes, 0, index, constraints, diameter, occupied, source, mode);
         }
         for (int index : endpointNeighbours(nodes, 1)) {
+            if(index>=firstEntry&&index<afterEntry)continue;
             addEdge(graph, endpointAssessments, nodes, 1, index, constraints, diameter, occupied, source, mode, target);
         }
-        // Indoor goals cannot connect to arbitrary obstacle corners. Add exact
-        // approach ports on rays through every equally nearest boundary point.
+        // Indoor goals are connected only through the currently selected facade
+        // distance tier. A farther wall is considered only after all nearer
+        // entry ports have proved unreachable.
         for(int entry=firstEntry;entry<nodes.size();entry++) {
-            addEdge(graph,endpointAssessments,nodes,1,entry,constraints,diameter,occupied,source,mode,target);
             if(entry<afterEntry) {
                 Coordinate port=nodes.get(entry);
+                addEdge(graph,endpointAssessments,nodes,1,entry,constraints,diameter,occupied,source,mode,target,port);
                 addEdge(graph,endpointAssessments,nodes,0,entry,constraints,diameter,occupied,source,mode,target,port);
                 List<Integer> regular=new ArrayList<>();
                 for(int n=2;n<nodes.size();n++)if(n<firstEntry||n>=afterEntry)regular.add(n);
@@ -156,6 +209,7 @@ public final class SparseVisibilityRouter {
                             Collections.emptyList(),null,mode,target,port))accepted[sector]++;
                 }
             } else {
+                addEdge(graph,endpointAssessments,nodes,1,entry,constraints,diameter,occupied,source,mode,target);
                 addEdge(graph,endpointAssessments,nodes,0,entry,constraints,diameter,occupied,source,mode);
                 for(int neighbour:endpointNeighbours(nodes,entry))if(neighbour<firstEntry||neighbour>=afterEntry)
                     addEdge(graph,endpointAssessments,nodes,entry,neighbour,constraints,diameter,occupied,source,mode);
@@ -177,12 +231,13 @@ public final class SparseVisibilityRouter {
 
     private List<Coordinate> calculateBuildingApproaches(InputSnapshot snapshot,Point goal,int diameter) {
         Map<String,Coordinate> approaches=new java.util.LinkedHashMap<>();
-        double setback=buildingClearance(diameter)+RuleBook.byDn(diameter).pairWidth/2+.20;
+        double clearance=buildingClearance(diameter)+RuleBook.byDn(diameter).pairWidth/2.0;
+        double setback=clearance+.20;
         Coordinate terminal=goal.getCoordinate();
         for(InputSnapshot.Restriction restriction:snapshot.restrictions) {
-            if(!"oks_existing".equals(restriction.type)||!restriction.geometry.covers(goal))continue;
+            if(!ownsGoal(restriction,goal))continue;
+            BuildingEntry.Area area=buildingAreas.computeIfAbsent(restriction.geometry,BuildingEntry.Area::new);
             Geometry boundary=BuildingEntry.exteriorBoundary(restriction.geometry);
-            double nearest=boundary.distance(goal);
             boundary.apply((GeometryComponentFilter)component->{
                 if(!(component instanceof LineString))return;
                 Coordinate[] ring=component.getCoordinates();
@@ -190,28 +245,79 @@ public final class SparseVisibilityRouter {
                     LineSegment wall=new LineSegment(ring[i-1],ring[i]);
                     Coordinate entry=wall.closestPoint(terminal);
                     double distance=entry.distance(terminal);
-                    if(distance>nearest+1e-6)continue;
                     if(distance>1e-8) {
-                        for(double offset:new double[]{setback}) {
-                            Coordinate port=new Coordinate(entry.x+(entry.x-terminal.x)*offset/distance,
-                                    entry.y+(entry.y-terminal.y)*offset/distance);
-                            approaches.putIfAbsent(key(port),port);
+                        double nx=(entry.x-terminal.x)/distance,ny=(entry.y-terminal.y)/distance;
+                        Coordinate fullPort=new Coordinate(entry.x+nx*setback,entry.y+ny*setback);
+                        Point fullPoint=geometryFactory.createPoint(fullPort);
+                        boolean fullSetbackUsable=!area.covers(fullPort)
+                                &&restriction.geometry.distance(fullPoint)>=clearance-1e-6;
+                        double[] offsets=fullSetbackUsable
+                                ?new double[]{setback}
+                                :new double[]{.05,.5,1.5,setback};
+                        for(double offset:offsets) {
+                            Coordinate port=new Coordinate(entry.x+nx*offset,entry.y+ny*offset);
+                            if(!area.covers(port))
+                                approaches.putIfAbsent(key(port),port);
                         }
                     } else if(wall.getLength()>1e-8) {
-                        // A connection point on the facade has a zero-length
-                        // internal lead; try both normals and validate the exterior.
-                        double dx=(wall.p1.y-wall.p0.y)/wall.getLength()*setback;
-                        double dy=(wall.p0.x-wall.p1.x)/wall.getLength()*setback;
+                        // Terminal exactly on the facade: test both outward normals.
+                        double ux=(wall.p1.y-wall.p0.y)/wall.getLength();
+                        double uy=(wall.p0.x-wall.p1.x)/wall.getLength();
                         for(int sign:new int[]{-1,1}) {
-                            Coordinate port=new Coordinate(entry.x+sign*dx,entry.y+sign*dy);
-                            if(!restriction.geometry.covers(geometryFactory.createPoint(port)))
-                                approaches.putIfAbsent(key(port),port);
+                            Coordinate fullPort=new Coordinate(entry.x+sign*ux*setback,entry.y+sign*uy*setback);
+                            Point fullPoint=geometryFactory.createPoint(fullPort);
+                            boolean fullSetbackUsable=!area.covers(fullPort)
+                                    &&restriction.geometry.distance(fullPoint)>=clearance-1e-6;
+                            double[] offsets=fullSetbackUsable
+                                    ?new double[]{setback}
+                                    :new double[]{.05,.5,1.5,setback};
+                            for(double offset:offsets) {
+                                Coordinate port=new Coordinate(entry.x+sign*ux*offset,entry.y+sign*uy*offset);
+                                if(!area.covers(port))
+                                    approaches.putIfAbsent(key(port),port);
+                            }
                         }
                     }
                 }
             });
         }
-        return new ArrayList<>(approaches.values());
+        List<Coordinate> result=new ArrayList<>(approaches.values());
+        result.sort(Comparator.comparingDouble((Coordinate port)->buildingLeadDistance(snapshot,goal,port))
+                .thenComparingDouble(port->port.distance(terminal))
+                .thenComparingDouble(port->port.x).thenComparingDouble(port->port.y));
+        List<Coordinate> selected=new ArrayList<>();
+        int[] directions=new int[VISIBILITY_SECTORS];
+        for(Coordinate port:result) {
+            int direction=sector(terminal,port);
+            if(selected.size()<8||directions[direction]<3){selected.add(port);directions[direction]++;}
+        }
+        return selected;
+    }
+
+    private boolean ownsGoal(InputSnapshot.Restriction restriction,Point goal) {
+        return "oks_existing".equals(restriction.type)&&buildingAreas.computeIfAbsent(restriction.geometry,BuildingEntry.Area::new).covers(goal.getCoordinate());
+    }
+
+
+
+    /**
+     * Distance travelled inside the terminal's building before the selected
+     * exterior facade is crossed. All ports of the same wall therefore receive
+     * the same tier even when one is a short exceptional port and another is a
+     * normal full-setback port.
+     */
+    private double buildingLeadDistance(InputSnapshot snapshot,Point goal,Coordinate port) {
+        LineString lead=line(port,goal.getCoordinate());
+        LineCalculationKey cacheKey=new LineCalculationKey(lead);
+        Double cached=leadDistances.get(cacheKey);
+        if(cached!=null)return cached;
+        double best=Double.POSITIVE_INFINITY;
+        for(InputSnapshot.Restriction restriction:snapshot.restrictions) {
+            if(!ownsGoal(restriction,goal))continue;
+            best=Math.min(best,buildingAreas.computeIfAbsent(restriction.geometry,BuildingEntry.Area::new).lengthInside(lead));
+        }
+        leadDistances.put(cacheKey,best);
+        return best;
     }
 
     private List<Coordinate> buildingEscapeNodes(InputSnapshot snapshot,Point goal,int diameter,List<Coordinate> ports) {
@@ -224,8 +330,9 @@ public final class SparseVisibilityRouter {
         List<Coordinate> result=new ArrayList<>();
         double clearance=buildingClearance(diameter)+RuleBook.byDn(diameter).pairWidth/2;
         for(InputSnapshot.Restriction owner:snapshot.restrictions) {
-            if(!"oks_existing".equals(owner.type)||!owner.geometry.covers(goal))continue;
-            Geometry envelope=owner.geometry.buffer(clearance+.20);
+            if(!ownsGoal(owner,goal))continue;
+            Geometry envelope=escapeEnvelopes.computeIfAbsent(owner.id+":"+diameter,key->owner.geometry.buffer(clearance+.20));
+            BuildingEntry.Area area=buildingAreas.computeIfAbsent(envelope,BuildingEntry.Area::new);
             Envelope bounds=envelope.getEnvelopeInternal();
             double reach=2*Math.hypot(bounds.getWidth(),bounds.getHeight())+20;
             for(Coordinate port:ports) {
@@ -234,12 +341,10 @@ public final class SparseVisibilityRouter {
                 for(double degrees:new double[]{-90,-45,0,45,90}) {
                     double angle=Math.toRadians(degrees),dx=nx*Math.cos(angle)-ny*Math.sin(angle),dy=nx*Math.sin(angle)+ny*Math.cos(angle);
                     LineString ray=line(port,new Coordinate(port.x+dx*reach,port.y+dy*reach));
-                    Geometry hit=ray.intersection(envelope);
                     org.locationtech.jts.linearref.LengthIndexedLine indexed=new org.locationtech.jts.linearref.LengthIndexedLine(ray);
-                    for(int i=0;i<hit.getNumGeometries();i++) {
-                        Geometry part=hit.getGeometryN(i);
-                        if(part.isEmpty()||part.distance(geometryFactory.createPoint(port))>1e-5)continue;
-                        double end=0;for(Coordinate c:part.getCoordinates())end=Math.max(end,indexed.project(c));
+                    for(double[] span:area.intervals(ray)) {
+                        if(span[0]>1e-5)continue;
+                        double end=span[1];
                         if(end+.05<reach)result.add(indexed.extractPoint(end+.05));
                     }
                 }
@@ -305,19 +410,15 @@ public final class SparseVisibilityRouter {
     }
 
     private List<Map<Integer, Double>> copyStaticGraph(GraphTemplate template, int totalSize) {
-        List<Map<Integer, Double>> graph = new ArrayList<>(totalSize);
-        for (int index = 0; index < totalSize; index++) graph.add(new HashMap<>());
-        for (int from = 0; from < template.edges.size(); from++) {
-            for (Map.Entry<Integer, Double> edge : template.edges.get(from).entrySet()) {
-                graph.get(from + 2).put(edge.getKey() + 2, edge.getValue());
-            }
-        }
-        return graph;
+        return new SearchGraph(template.shiftedEdges, totalSize);
     }
 
     private List<Integer> nearestByDistance(List<Coordinate> nodes, int index) {
+        double[] distances=new double[nodes.size()];
+        for(int candidate=0;candidate<nodes.size();candidate++)
+            distances[candidate]=nodes.get(index).distance(nodes.get(candidate));
         Comparator<Integer> nearestFirst = Comparator.<Integer>comparingDouble(
-                candidate -> nodes.get(index).distance(nodes.get(candidate))).thenComparingInt(candidate -> candidate);
+                candidate -> distances[candidate]).thenComparingInt(candidate -> candidate);
         PriorityQueue<Integer> nearest = new PriorityQueue<>(FAST_NEAREST_CANDIDATES, nearestFirst.reversed());
         for (int candidate = 0; candidate < nodes.size(); candidate++) {
             if (candidate == index) continue;
@@ -405,6 +506,11 @@ public final class SparseVisibilityRouter {
             entryAssessments.clear();
             approachesByGoal.clear();
             escapesByGoal.clear();
+            buildingAreas.clear();escapeEnvelopes.clear();
+            leadDistances.clear();
+            occupiedKeys=Collections.emptyList();
+            occupiedSegments=new STRtree();
+            occupiedAssessments.clear();
             staticGraphBuilds = 0;
         }
         return cachedConstraints;
@@ -429,6 +535,8 @@ public final class SparseVisibilityRouter {
                 parameters.setJoinStyle(org.locationtech.jts.operation.buffer.BufferParameters.JOIN_MITRE);
                 parameters.setEndCapStyle(org.locationtech.jts.operation.buffer.BufferParameters.CAP_SQUARE);
                 Geometry buffered = org.locationtech.jts.operation.buffer.BufferOp.bufferOp(restriction.geometry, clearance, parameters);
+                // Working vertices only: every edge is checked against the untouched input.
+                buffered=org.locationtech.jts.simplify.TopologyPreservingSimplifier.simplify(buffered,.25);
                 List<Coordinate> coordinates = new ArrayList<>();
                 for (Coordinate coordinate : buffered.getCoordinates()) {
                     coordinates.add(new Coordinate(coordinate));
@@ -537,15 +645,23 @@ public final class SparseVisibilityRouter {
             return false;
         }
         double weight = nodes.get(left).distance(nodes.get(right)) * assessment.multiplier;
-        graph.get(left).put(right, weight);
-        graph.get(right).put(left, weight);
+        writableEdges(graph,left).put(right, weight);
+        writableEdges(graph,right).put(left, weight);
         return true;
+    }
+
+    private static Map<Integer,Double> writableEdges(List<Map<Integer,Double>> graph,int node) {
+        return graph instanceof SearchGraph?((SearchGraph)graph).writable(node):graph.get(node);
     }
 
     private Optional<LineString> shortestPath(List<Coordinate> nodes, List<Map<Integer, Double>> graph,
                                                int source, int target, RouteConstraintEngine constraints,
                                                int diameter, List<LineString> occupied, Coordinate allowedTouch,
                                                RunMode mode, Coordinate allowedBuildingTerminal,int firstEntry,int afterEntry) {
+        // Exact remaining distance on the relaxed graph is an admissible bound:
+        // bends, heading constraints and occupied pipes can only add cost/remove edges.
+        double[] remaining=remainingDistances(graph,target,firstEntry,afterEntry);
+        if(!Double.isFinite(remaining[source]))return Optional.empty();
         PriorityQueue<State> queue = new PriorityQueue<>(Comparator.comparingDouble((State value) -> value.priority)
                 .thenComparingInt(value -> value.node).thenComparingInt(value -> value.prior));
         Map<StateKey, Double> distance = new HashMap<>();
@@ -557,7 +673,7 @@ public final class SparseVisibilityRouter {
         Map<Long, Boolean> barrierAssessments = new HashMap<>();
         StateKey first = new StateKey(source, -1);
         distance.put(first, 0.0);
-        queue.add(new State(source, -1, 0.0, nodes.get(source).distance(nodes.get(target))));
+        queue.add(new State(source, -1, 0.0, remaining[source]));
         while (!queue.isEmpty()) {
             State current = queue.remove();
             StateKey key = new StateKey(current.node, current.prior);
@@ -567,14 +683,15 @@ public final class SparseVisibilityRouter {
                 for(StateKey step=key;step!=null;step=previous.get(step))path.add(nodes.get(step.node));
                 Collections.reverse(path);
                 List<Coordinate> simplified=simplify(path,constraints,diameter,occupied,allowedTouch,mode,allowedBuildingTerminal);
-                LineString candidate=geometryFactory.createLineString(simplified.toArray(new Coordinate[0]));
-                if(depthFeasible(cachedSnapshot,candidate,diameter,mode))return Optional.of(candidate);
-                candidate=geometryFactory.createLineString(path.toArray(new Coordinate[0]));
-                if(depthFeasible(cachedSnapshot,candidate,diameter,mode))return Optional.of(candidate);
+                LineString candidate=geometryFactory.createLineString(org.locationtech.jts.geom.CoordinateArrays.copyDeep(simplified.toArray(new Coordinate[0])));
+                if(candidate.isSimple()&&depthFeasible(cachedSnapshot,candidate,diameter,mode))return Optional.of(candidate);
+                candidate=geometryFactory.createLineString(org.locationtech.jts.geom.CoordinateArrays.copyDeep(path.toArray(new Coordinate[0])));
+                if(candidate.isSimple()&&depthFeasible(cachedSnapshot,candidate,diameter,mode))return Optional.of(candidate);
                 continue;
             }
             for (Map.Entry<Integer, Double> next : graph.get(current.node).entrySet()) {
                 int neighbour = next.getKey();
+                if(!Double.isFinite(remaining[neighbour]))continue;
                 if(current.node>=firstEntry&&current.node<afterEntry&&neighbour!=target)continue;
                 if (neighbour == current.prior || (current.prior >= 0
                         && reverses(nodes.get(current.prior), nodes.get(current.node), nodes.get(neighbour)))) continue;
@@ -591,17 +708,58 @@ public final class SparseVisibilityRouter {
                 double nextCost = current.cost + next.getValue()
                         + bendPenalty(nodes, current.prior, current.node, neighbour);
                 if (nextCost >= distance.getOrDefault(nextKey, Double.POSITIVE_INFINITY) - 1e-9) continue;
+                if(intersectsPath(nodes,previous,key,neighbour))continue;
                 distance.put(nextKey, nextCost);
                 previous.put(nextKey, key);
                 queue.add(new State(neighbour, current.node, nextCost,
-                        nextCost + nodes.get(neighbour).distance(nodes.get(target))));
+                        nextCost + remaining[neighbour]));
             }
         }
         return Optional.empty();
     }
 
+    private boolean intersectsPath(List<Coordinate> nodes,Map<StateKey,StateKey> previous,StateKey current,int next) {
+        Coordinate a=nodes.get(current.node),b=nodes.get(next);
+        Envelope envelope=new Envelope(a,b);
+        RobustLineIntersector intersection=new RobustLineIntersector();
+        for(StateKey step=current;step!=null&&step.prior>=0;step=previous.get(step)) {
+            if(step.node==next||step.prior==next)return true;
+            Coordinate c=nodes.get(step.prior),d=nodes.get(step.node);
+            if(!envelope.intersects(new Envelope(c,d)))continue;
+            intersection.computeIntersection(a,b,c,d);
+            if(!intersection.hasIntersection())continue;
+            // Only the shared endpoint of successive segments may touch.
+            if(step==current&&intersection.getIntersectionNum()==1&&intersection.getIntersection(0).distance(a)<1e-7)continue;
+            return true;
+        }
+        return false;
+    }
+
+    private double[] remainingDistances(List<Map<Integer,Double>> graph,int target,int firstEntry,int afterEntry) {
+        double[] distances=new double[graph.size()];
+        Arrays.fill(distances,Double.POSITIVE_INFINITY);
+        distances[target]=0;
+        PriorityQueue<State> queue=new PriorityQueue<>(Comparator.comparingDouble((State state)->state.cost)
+                .thenComparingInt(state->state.node));
+        queue.add(new State(target,-1,0,0));
+        while(!queue.isEmpty()) {
+            State current=queue.remove();
+            if(current.cost>distances[current.node])continue;
+            for(Map.Entry<Integer,Double> edge:graph.get(current.node).entrySet()) {
+                int predecessor=edge.getKey();
+                // Reverse traversal of the port rule: ports only lead to the goal.
+                if(predecessor>=firstEntry&&predecessor<afterEntry&&current.node!=target)continue;
+                double cost=current.cost+edge.getValue();
+                if(cost>=distances[predecessor])continue;
+                distances[predecessor]=cost;
+                queue.add(new State(predecessor,-1,cost,cost));
+            }
+        }
+        return distances;
+    }
+
     private boolean depthFeasible(InputSnapshot snapshot,LineString line,int diameter,RunMode mode) {
-        return mode!=RunMode.DEPTH||new ru.lct.teplokontur.engineering.SegmentCostModel().feasibleDepth(snapshot,line,diameter);
+        return mode!=RunMode.DEPTH||depthCosts.feasibleDepth(snapshot,line,diameter);
     }
 
     private List<Coordinate> simplify(List<Coordinate> input, RouteConstraintEngine constraints, int diameter,
@@ -625,6 +783,52 @@ public final class SparseVisibilityRouter {
     }
 
     private boolean blockedByNewLines(LineString segment, List<LineString> occupied, Coordinate allowedTouch) {
+        if(occupied==null||occupied.isEmpty())return false;
+        Envelope envelope=new Envelope(segment.getEnvelopeInternal());envelope.expandBy(.05);
+        Coordinate touch=allowedTouch!=null&&envelope.contains(allowedTouch)?allowedTouch:null;
+        LineCalculationKey cacheKey=new LineCalculationKey(segment,
+                touch==null?Double.NaN:touch.x,touch==null?Double.NaN:touch.y);
+        Boolean cached=occupiedAssessments.get(cacheKey);
+        if(cached!=null)return cached;
+        boolean blocked=indexedBlockedByNewLines(segment,occupied,allowedTouch);
+        occupiedAssessments.put(cacheKey,blocked);
+        return blocked;
+    }
+
+    private void prepareOccupied(List<LineString> occupied) {
+        if(occupied==null||occupied.isEmpty())return;
+        List<LineCalculationKey> keys=new ArrayList<>(occupied.size());
+        for(LineString line:occupied)keys.add(new LineCalculationKey(line));
+        if(!keys.equals(occupiedKeys)){
+            occupiedKeys=keys;occupiedAssessments.clear();
+            occupiedSegments=new STRtree();
+            for(LineString line:occupied) {
+                Coordinate[] points=org.locationtech.jts.geom.CoordinateArrays.copyDeep(line.getCoordinates());
+                for(int i=1;i<points.length;i++)
+                    occupiedSegments.insert(new Envelope(points[i-1],points[i]),new LineSegment(points[i-1],points[i]));
+            }
+            occupiedSegments.build();
+        }
+    }
+
+    private boolean indexedBlockedByNewLines(LineString segment,List<LineString> occupied,Coordinate allowedTouch) {
+        Coordinate[] points=segment.getCoordinates();
+        RobustLineIntersector intersection=new RobustLineIntersector();
+        for(int i=1;i<points.length;i++) {
+            for(Object value:occupiedSegments.query(new Envelope(points[i-1],points[i]))) {
+                LineSegment existing=(LineSegment)value;
+                intersection.computeIntersection(points[i-1],points[i],existing.p0,existing.p1);
+                if(!intersection.hasIntersection())continue;
+                // Collinear pieces need the original overlay to measure their union length.
+                if(intersection.getIntersectionNum()==2)
+                    return calculateBlockedByNewLines(segment,occupied,allowedTouch);
+                if(allowedTouch==null||intersection.getIntersection(0).distance(allowedTouch)>=.05)return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean calculateBlockedByNewLines(LineString segment,List<LineString> occupied,Coordinate allowedTouch) {
         for (LineString existing : occupied) {
             if (!segment.getEnvelopeInternal().intersects(existing.getEnvelopeInternal())) continue;
             Geometry intersection = segment.intersection(existing);
@@ -645,6 +849,12 @@ public final class SparseVisibilityRouter {
                           List<LineString> occupied, Coordinate allowedTouch, RunMode mode,
                           Coordinate allowedBuildingTerminal) {
         return constraints.assess(line(a,b),diameter,occupied,allowedTouch,mode,allowedBuildingTerminal).feasible;
+    }
+
+    private boolean legal(RouteConstraintEngine constraints, Coordinate a, Coordinate b, int diameter,
+                          List<LineString> occupied, Coordinate allowedTouch, RunMode mode,
+                          Coordinate allowedBuildingTerminal,Coordinate entryPort) {
+        return constraints.assess(line(a,b),diameter,occupied,allowedTouch,mode,allowedBuildingTerminal,entryPort).feasible;
     }
 
     private LineString line(Coordinate a, Coordinate b) {
@@ -734,10 +944,33 @@ public final class SparseVisibilityRouter {
 
     private static final class GraphTemplate {
         private final List<Coordinate> nodes;
-        private final List<Map<Integer, Double>> edges;
+        private final List<Map<Integer, Double>> shiftedEdges;
         private GraphTemplate(List<Coordinate> nodes, List<Map<Integer, Double>> edges) {
             this.nodes = nodes;
-            this.edges = edges;
+            shiftedEdges=new ArrayList<>(edges.size()+2);
+            shiftedEdges.add(Collections.emptyMap());
+            shiftedEdges.add(Collections.emptyMap());
+            for(Map<Integer,Double> adjacency:edges) {
+                Map<Integer,Double> shifted=new HashMap<>();
+                for(Map.Entry<Integer,Double> edge:adjacency.entrySet())
+                    shifted.put(edge.getKey()+2,edge.getValue());
+                shiftedEdges.add(Collections.unmodifiableMap(shifted));
+            }
+        }
+    }
+
+    /** Share the immutable graph; copy only adjacency maps touched by endpoint edges. */
+    private static final class SearchGraph extends ArrayList<Map<Integer,Double>> {
+        private final boolean[] owned;
+        private SearchGraph(List<Map<Integer,Double>> base,int size) {
+            super(size);
+            addAll(base);
+            while(size()<size)add(Collections.emptyMap());
+            owned=new boolean[size];
+        }
+        private Map<Integer,Double> writable(int node) {
+            if(!owned[node]){set(node,new HashMap<>(get(node)));owned[node]=true;}
+            return get(node);
         }
     }
 

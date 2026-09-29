@@ -28,8 +28,8 @@ public final class JointPlanRefiner {
             routeCosts.clear();
         }
         RouteConstraintEngine constraints = cachedConstraints;
-        for (double step : new double[]{48,24,12,6,3,1}) {
-            for (int pass=0; pass<3; pass++) {
+        for (double step : new double[]{12,3,1}) {
+            for (int pass=0; pass<1; pass++) {
                 NetworkPlan next = round(snapshot,best,constraints,step);
                 if (next == best) break;
                 best = next;
@@ -70,7 +70,7 @@ public final class JointPlanRefiner {
             matrices.put(new JointChamberMilp.Edge(a,b),matrix); routes.put(edge,lines);
         }
         NetworkPlan best=plan;
-        for(JointChamberMilp.Assignment assignment:new JointChamberMilp().solve(virtualRoot,counts,matrices,24)) {
+        for(JointChamberMilp.Assignment assignment:new JointChamberMilp().solve(virtualRoot,counts,matrices,8)) {
             NetworkPlan candidate=SharedNetworkBuilder.copy(plan);
             for(int i=0;i<nodes.size();i++) {
                 PlanNode old=candidate.nodes.get(nodes.get(i).id);
@@ -127,20 +127,19 @@ public final class JointPlanRefiner {
     }
 
     private double calculateLegalCost(InputSnapshot s,NetworkPlan plan,PlanEdge edge,LineString line,RouteConstraintEngine constraints) {
-        if(line.getLength()<.05)return Double.POSITIVE_INFINITY;
+        if(line.getLength()<.05||!line.isSimple())return Double.POSITIVE_INFINITY;
         Coordinate[] c=line.getCoordinates();
         for(int i=0;i<c.length-1;i++) {
             Coordinate ownTerminal=edge.child.kind==NodeKind.TERMINAL&&i>=c.length-3?c[c.length-1]:null;
-            Coordinate entryPort=ownTerminal!=null&&i==c.length-3?c[c.length-2]:null;
+            Coordinate entryPort=ownTerminal!=null&&c.length>=3?c[c.length-2]:null;
             if(!constraints.assess(gf.createLineString(new Coordinate[]{c[i],c[i+1]}),edge.dn,
                     Collections.emptyList(),c[0],plan.mode,ownTerminal,entryPort).feasible)return Double.POSITIVE_INFINITY;
             if(i>0&&(c[i].x-c[i-1].x)*(c[i+1].x-c[i].x)+(c[i].y-c[i-1].y)*(c[i+1].y-c[i].y)<-1e-6)
                 return Double.POSITIVE_INFINITY;
         }
         PlanEdge trial=new PlanEdge(edge.id,edge.parent,edge.child,line);trial.dn=edge.dn;trial.flow=edge.flow;
-        List<CostedRouteSegment> segments=costs.splitAndCost(s,trial,plan.mode);
-        if(plan.mode==RunMode.DEPTH&&!costs.feasibleDepth(segments))return Double.POSITIVE_INFINITY;
-        double cost=0;for(CostedRouteSegment segment:segments)cost+=segment.cost;
+        if(plan.mode==RunMode.DEPTH&&!costs.feasibleDepth(s,trial))return Double.POSITIVE_INFINITY;
+        double cost=costs.constructionCost(s,trial,plan.mode);
         return RuleBook.officialScore(cost,line.getLength());
     }
 }

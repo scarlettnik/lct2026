@@ -2,11 +2,41 @@ package ru.lct.teplokontur.engineering;
 
 import org.locationtech.jts.geom.*;
 import org.locationtech.jts.linearref.LengthIndexedLine;
+import org.locationtech.jts.index.strtree.STRtree;
 import ru.lct.teplokontur.domain.*;
 import java.util.*;
 
 /** Piecewise linear depth profiles; lengths remain horizontal UTM lengths. */
 public class SegmentCostModel {
+    private InputSnapshot cachedSnapshot;
+    private STRtree restrictions;
+    private STRtree network;
+    private final Map<LineCalculationKey,List<CostedRouteSegment>> profiles=new LinkedHashMap<LineCalculationKey,List<CostedRouteSegment>>(256,.75f,true) {
+        @Override protected boolean removeEldestEntry(Map.Entry<LineCalculationKey,List<CostedRouteSegment>> entry){return size()>4096;}
+    };
+
+    private void prepare(InputSnapshot snapshot) {
+        if(cachedSnapshot==snapshot)return;
+        cachedSnapshot=snapshot;
+        profiles.clear();
+        restrictions=new STRtree();network=new STRtree();
+        for(int i=0;i<snapshot.restrictions.size();i++)
+            restrictions.insert(snapshot.restrictions.get(i).geometry.getEnvelopeInternal(),i);
+        for(int i=0;i<snapshot.network.size();i++)
+            network.insert(snapshot.network.get(i).geometry.getEnvelopeInternal(),i);
+        restrictions.build();network.build();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> List<T> nearby(STRtree index,List<T> source,Envelope envelope) {
+        List<Integer> matches=new ArrayList<>(index.query(envelope));
+        // Preserve input order, including the order used to reconcile depth plateaus.
+        Collections.sort(matches);
+        List<T> result=new ArrayList<>(matches.size());
+        for(int match:matches)result.add(source.get(match));
+        return result;
+    }
+
     private static final class Interval {
         final double a,b,factor,below,minimum;
         double depth;
@@ -20,9 +50,39 @@ public class SegmentCostModel {
     }
 
     public List<CostedRouteSegment> splitAndCost(InputSnapshot s,PlanEdge edge,RunMode mode) {
+        List<CostedRouteSegment> cached=profile(s,edge,mode);
+        List<CostedRouteSegment> result=new ArrayList<>(cached.size());
+        // Keep mutable export objects and their flow separate from cached calculations.
+        for(CostedRouteSegment part:cached) {
+            CostedRouteSegment copy=new CostedRouteSegment();
+            copy.geometry=(LineString)part.geometry.copy();copy.layingMethod=part.layingMethod;
+            copy.depthStart=part.depthStart;copy.depthEnd=part.depthEnd;copy.length=part.length;
+            copy.cost=part.cost;copy.specialFactor=part.specialFactor;copy.dn=part.dn;copy.flow=edge.flow;
+            result.add(copy);
+        }
+        return result;
+    }
+
+    private List<CostedRouteSegment> profile(InputSnapshot s,PlanEdge edge,RunMode mode) {
+        prepare(s);
+        LineCalculationKey key=new LineCalculationKey(edge.geometry,edge.dn,mode.ordinal());
+        return profiles.computeIfAbsent(key,ignored->calculateProfile(s,edge,mode));
+    }
+
+    public double constructionCost(InputSnapshot s,PlanEdge edge,RunMode mode) {
+        double result=0;
+        for(CostedRouteSegment part:profile(s,edge,mode))result+=part.cost;
+        return result;
+    }
+
+    public boolean feasibleDepth(InputSnapshot s,PlanEdge edge) {
+        return feasibleDepth(profile(s,edge,RunMode.DEPTH));
+    }
+
+    private List<CostedRouteSegment> calculateProfile(InputSnapshot s,PlanEdge edge,RunMode mode) {
         LineString line=edge.geometry;double length=line.getLength();LengthIndexedLine li=new LengthIndexedLine(line);
         List<Interval> intervals=new ArrayList<>();
-        for(InputSnapshot.Restriction r:s.restrictions) {
+        for(InputSnapshot.Restriction r:nearby(restrictions,s.restrictions,line.getEnvelopeInternal())) {
             RestrictionRule rule=RestrictionRules.get(r.type);
             if(rule==null||!rule.crossingAllowed||!line.getEnvelopeInternal().intersects(r.geometry.getEnvelopeInternal()))continue;
             Geometry intersection=line.intersection(r.geometry);
@@ -42,7 +102,7 @@ public class SegmentCostModel {
                 intervals.add(new Interval(Math.max(0,a-rule.extraEachSide),Math.min(length,b+rule.extraEachSide),rule.specialFactor,depth,below,minimum));
             }
         }
-        for(InputSnapshot.ExistingEdge ex:s.network) {
+        for(InputSnapshot.ExistingEdge ex:nearby(network,s.network,line.getEnvelopeInternal())) {
             if(!line.getEnvelopeInternal().intersects(ex.geometry.getEnvelopeInternal()))continue;
             Geometry intersection=line.intersection(ex.geometry);
             if(intersection.isEmpty()||intersection.getDimension()>=1)continue;
@@ -120,7 +180,7 @@ public class SegmentCostModel {
     /** Routing must reject profiles that cannot return to normal depth at the two nodes. */
     public boolean feasibleDepth(InputSnapshot snapshot,LineString line,int dn) {
         PlanEdge edge=new PlanEdge("profile",null,null,line);edge.dn=dn;
-        return feasibleDepth(splitAndCost(snapshot,edge,RunMode.DEPTH));
+        return feasibleDepth(snapshot,edge);
     }
 
     public boolean feasibleDepth(List<CostedRouteSegment> parts) {

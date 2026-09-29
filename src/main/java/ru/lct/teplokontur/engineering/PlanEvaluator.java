@@ -25,7 +25,7 @@ public class PlanEvaluator {
             Double cached=constructionCosts.get(key);
             if(cached!=null)e.cost=cached;
             else {
-                for(CostedRouteSegment segment:costModel.splitAndCost(s,e,p.mode))e.cost+=segment.cost;
+                e.cost=costModel.constructionCost(s,e,p.mode);
                 constructionCosts.put(key,e.cost);
             }
             p.constructionCost+=e.cost;p.newLength+=e.length;

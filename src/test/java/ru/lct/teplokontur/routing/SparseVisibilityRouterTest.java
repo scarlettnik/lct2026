@@ -126,6 +126,30 @@ class SparseVisibilityRouterTest {
     }
 
     @Test
+    void fallsBackToTheNearestReachableFacadeWhenTheGeometricNearestIsBlocked() {
+        InputSnapshot snapshot=new InputSnapshot(1);
+        InputSnapshot.Restriction building=new InputSnapshot.Restriction();
+        building.id="building";building.type="oks_existing";
+        building.geometry=geometryFactory.createPolygon(new Coordinate[]{new Coordinate(0,0),
+                new Coordinate(30,0),new Coordinate(30,20),new Coordinate(0,20),new Coordinate(0,0)});
+        InputSnapshot.Restriction blocked=new InputSnapshot.Restriction();
+        blocked.id="blocked-nearest-wall";blocked.type="park";
+        blocked.geometry=geometryFactory.createPolygon(new Coordinate[]{new Coordinate(31,4),
+                new Coordinate(42,4),new Coordinate(42,16),new Coordinate(31,16),new Coordinate(31,4)});
+        snapshot.restrictions.add(building);snapshot.restrictions.add(blocked);
+
+        for(RunMode mode:RunMode.values()) {
+            LineString route=new SparseVisibilityRouter().route(snapshot,point(-20,30),point(28,10),100,
+                    mode,Collections.emptyList(),0).orElseThrow();
+            assertEquals(10,route.intersection(building.geometry).getLength(),1e-5,
+                    "East wall is only 2 m away but blocked; the next reachable north/south wall is 10 m away");
+            Coordinate port=route.getCoordinateN(route.getNumPoints()-2);
+            assertTrue(port.y>20||port.y<0,"Fallback must use another exterior wall");
+            assertTrue(route.disjoint(blocked.geometry));
+        }
+    }
+
+    @Test
     void cachedRouteStillRespectsNewlyBuiltLines() {
         InputSnapshot snapshot=new InputSnapshot(1);
         SparseVisibilityRouter router=new SparseVisibilityRouter();

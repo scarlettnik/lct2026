@@ -26,6 +26,8 @@ competition:
     max-expanded-cells: 900000
     working-set-padding-m: 5000
   optimizer:
+    max-starts: 3
+    refine: true
     beam-width: 24
     tie-candidates: 8
     k-paths: 4

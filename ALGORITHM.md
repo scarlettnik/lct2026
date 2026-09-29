@@ -1,5 +1,7 @@
 # Техническое приложение: подробное описание алгоритма TeploKontur
 
+> Актуальные настройки: три старта, ограниченное улучшение и независимая проверка самопересечений и вводов по исходным полигонам. Стоимость врезки в существующую камеру экспортируется дополнительным полем `heat_network.tie_in_cost` (помимо строительного `cost`).
+
 ## 1. Назначение
 
 Документ описывает фактический алгоритм Java-проекта TeploKontur: от загрузки GeoJSON до выбора и экспорта финальных вариантов.
@@ -358,7 +360,7 @@ Required clearance вне tie point:
 dmin = distance(terminal, exterior boundary)
 ```
 
-Рассматриваются все равноудалённые ближайшие стены.
+Ближайшие доступные подходы рассматриваются первыми. Если маршрут не найден, выбираются следующие внешние фасады; исходные полигоны остаются обязательными для итоговой проверки.
 
 ---
 
@@ -381,10 +383,10 @@ Lead допустим, только если:
 1. terminal на одном конце;
 2. пересекается только собственное здание;
 3. выход расположен на exterior boundary;
-4. длина участка внутри здания равна кратчайшему расстоянию до фасада;
+4. участок внутри здания прямой и не проходит транзитом через здание;
 5. внешний конец находится за required clearance.
 
-Вход через дальнюю стену отклоняется.
+При недоступном ближайшем подходе разрешён другой внешний фасад. Перпендикулярность ввода не требуется.
 
 ---
 
@@ -396,7 +398,7 @@ Lead допустим, только если:
 -90°, -45°, 0°, 45°, 90°
 ```
 
-Это позволяет обойти крылья здания после выхода через обязательную ближайшую стену.
+Это позволяет обойти крылья здания после выхода через выбранный допустимый фасад.
 
 ---
 
@@ -484,7 +486,7 @@ incoming · outgoing < 0
 Priority queue использует:
 
 ```text
-priority = accumulatedCost + EuclideanDistanceToGoal
+priority = accumulatedCost + remainingGraphDistanceIgnoringTurns
 ```
 
 Поиск A*-подобный.
@@ -599,7 +601,7 @@ DN(edge) = minForFlow(flow(edge))
 
 # 45. Ограничение maxLength
 
-Для непрерывной группы одинакового DN:
+Для непрерывной части с одинаковым расчётным расходом:
 
 ```text
 runLength = Σ length
@@ -689,10 +691,10 @@ Reconstruction totals существуют как поля, но в текуще
 Resolution schedule:
 
 ```text
-48 → 24 → 12 → 6 → 3 → 1 m
+12 → 3 → 1 m
 ```
 
-До 3 passes на каждом уровне.
+Один проход на каждом уровне.
 
 ---
 
@@ -756,7 +758,7 @@ edgeCost(parentCandidate, childCandidate)
 
 После извлечения состояния генерируются соседи увеличением одного индекса.
 
-Limit = 24 assignments.
+Limit = 8 assignments.
 
 ---
 
@@ -791,12 +793,12 @@ Solver точен для фиксированных:
 # 60. Multi-start
 
 ```text
-attempts = max(3, min(6, kPaths + 1))
+attempts = competition.optimizer.maxStarts (default: 3)
 ```
 
-При `kPaths=4`: 5 стартов.
+По умолчанию выполняются три старта.
 
-Если diversity недостаточна, число стартов может увеличиться до 8.
+Можно явно настроить до восьми стартов; для конкурсного набора проверяется получение трёх различных вариантов.
 
 Default random seed: `20260922`.
 
@@ -818,7 +820,7 @@ repeat:
     stop if score did not improve
 ```
 
-Rounds: 2 для 2D, 3 для DEPTH.
+Один раунд переподключения для каждого режима при включённом refine.
 
 ---
 
@@ -1212,15 +1214,15 @@ function route(start, goal, DN, mode, occupied):
 ```text
 function jointlyRefine(plan):
 
-    for step in [48,24,12,6,3,1]:
-        repeat up to 3 passes:
+    for step in [12,3,1]:
+        one pass:
 
             positions[node] = legal candidate positions
 
             for every edge:
                 build pairwise cost matrix
 
-            assignments = exactTopKTreeDP(limit=24)
+            assignments = exactTopKTreeDP(limit=8)
             best = plan
 
             for assignment:
@@ -1366,7 +1368,7 @@ special crossings valid
 flow(edge) = downstream demand
 DN(edge) = required PipeSizing value
 DN does not decrease toward root
-same-DN maxLength satisfied
+constant-flow chain has uniform DN satisfying total length
 ```
 
 ## 3D

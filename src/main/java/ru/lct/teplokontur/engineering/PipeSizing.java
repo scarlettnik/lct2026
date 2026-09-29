@@ -25,15 +25,16 @@ public final class PipeSizing {
                 }
                 for(int start=0;start<path.size();) {
                     int end=start+1,dn=diameters.get(path.get(start));
-                    while(end<path.size()&&diameters.get(path.get(end))==dn)end++;
+                    double chainFlow=path.get(start).flow;
+                    while(end<path.size()&&Math.abs(path.get(end).flow-chainFlow)<=1e-9)end++;
                     double length=0,flow=0;
-                    for(int i=start;i<end;i++){PlanEdge edge=path.get(i);length+=edge.geometry.getLength();flow=Math.max(flow,edge.flow);}
+                    for(int i=start;i<end;i++){PlanEdge edge=path.get(i);length+=edge.geometry.getLength();flow=Math.max(flow,edge.flow);dn=Math.max(dn,diameters.get(edge));}
                     final int current=dn;
                     final double runLength=length,requiredFlow=flow;
                     DnSpec selected=RuleBook.DN.stream().filter(spec->spec.dn>=current
                             &&spec.capacity+1e-9>=requiredFlow&&spec.maxLength+1e-9>=runLength).findFirst()
                             .orElseThrow(()->new IllegalArgumentException("No DN satisfies flow and path length: "+requiredFlow+" tph / "+runLength+" m"));
-                    if(selected.dn>dn){for(int i=start;i<end;i++)diameters.put(path.get(i),selected.dn);changed=true;}
+                    for(int i=start;i<end;i++)if(diameters.get(path.get(i))!=selected.dn){diameters.put(path.get(i),selected.dn);changed=true;}
                     start=end;
                 }
             }

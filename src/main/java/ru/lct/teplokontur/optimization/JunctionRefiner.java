@@ -9,10 +9,10 @@ import ru.lct.teplokontur.validation.EngineeringValidator;
 /** Refines chamber locations while retaining only fully valid score improvements. */
 public final class JunctionRefiner {
     private final GeometryFactory gf = new GeometryFactory();
+    private final PlanEvaluator evaluator = new PlanEvaluator();
+    private final EngineeringValidator validator = new EngineeringValidator();
 
     public void improve(InputSnapshot snapshot, NetworkPlan plan) {
-        PlanEvaluator evaluator = new PlanEvaluator();
-        EngineeringValidator validator = new EngineeringValidator();
         for (double step : new double[]{24,12,6,3,1}) {
             for (int pass=0; pass<3; pass++) {
                 boolean changed=false;
@@ -28,6 +28,7 @@ public final class JunctionRefiner {
                     candidates.sort(Comparator.comparingDouble(c -> localCost(node,adjacent,c)));
                     double originalCost=localCost(node,adjacent,origin);
                     double originalScore=plan.score;
+                    ValidationReport originalValidation=plan.validation;
                     for(Coordinate candidate:candidates) {
                         if(localCost(node,adjacent,candidate)>=originalCost-1e-8) break;
                         List<LineString> geometry=new ArrayList<>();
@@ -52,7 +53,7 @@ public final class JunctionRefiner {
                         }
                         plan.nodes.put(id,node);
                         evaluator.evaluate(snapshot,plan);
-                        plan.validation=validator.validate(snapshot,plan);
+                        plan.validation=originalValidation;
                     }
                 }
                 if(!changed)break;

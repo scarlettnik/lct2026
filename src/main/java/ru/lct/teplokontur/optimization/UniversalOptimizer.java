@@ -17,17 +17,17 @@ public class UniversalOptimizer {
         PlanEvaluator evaluator=new PlanEvaluator();
         EngineeringValidator validator=new EngineeringValidator();
         JointPlanRefiner jointRefiner=new JointPlanRefiner();
-        JunctionRefiner junctionRefiner=new JunctionRefiner();
         PlanLocalSearch localSearch=new PlanLocalSearch();
         List<NetworkPlan> candidates=new ArrayList<>();
-        int attempts=Math.max(3,Math.min(6,props.getOptimizer().getKPaths()+1));
+        int attempts=props.getOptimizer().getMaxStarts();
+        boolean refine=props.getOptimizer().isRefine();
         for(int seed=0;seed<attempts;seed++) {
             int salt=seed==0?0:seed+(int)Math.floorMod(props.getOptimizer().getRandomSeed(),10000);
             NetworkPlan plan=builder.build(snapshot,mode,salt);
-            junctionRefiner.improve(snapshot,plan);
-            plan=jointRefiner.improve(snapshot,plan);
+            if(refine)plan=jointRefiner.improve(snapshot,plan);
+            else localSearch.improve(snapshot,plan,evaluator,validator);
             archive(snapshot,plan,seed,candidates,evaluator,validator);
-            for(int round=0;round<(mode==RunMode.DEPTH?3:2);round++) {
+            for(int round=0;refine&&round<1;round++) {
                 double before=plan.score;
                 plan=builder.reconnectLeaves(snapshot,plan);
                 localSearch.improve(snapshot,plan,evaluator,validator);
@@ -40,7 +40,6 @@ public class UniversalOptimizer {
             if(plan.validation.passed)candidates.add(plan);
             System.out.printf(Locale.ROOT,"CANDIDATE mode=%s seed=%d score=%.9f valid=%s unconnected=%d%n",
                     mode,seed,plan.score,plan.validation.passed,plan.unconnected.size());
-            if(seed==attempts-1&&attempts<8&&new MilpPortfolioSelector(new VariantDiversity()).select(bestCoverage(candidates)).size()<3)attempts++;
         }
         if(candidates.isEmpty())throw new IllegalStateException("No engineering-valid plans");
         List<NetworkPlan> selected=new MilpPortfolioSelector(new VariantDiversity()).select(bestCoverage(candidates));
