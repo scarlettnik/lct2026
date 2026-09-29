@@ -1,0 +1,2 @@
+package ru.lct.teplokontur.domain;import org.locationtech.jts.geom.Point;
+public final class TieCandidate {public final String existingId,type;public final Point point;public final int existingDn;public final double chainage;public TieCandidate(String existingId,String type,Point point,int existingDn,double chainage){this.existingId=existingId;this.type=type;this.point=point;this.existingDn=existingDn;this.chainage=chainage;}}

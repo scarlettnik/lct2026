@@ -1,0 +1,3 @@
+package ru.lct.teplokontur.domain;
+import java.util.*;
+public class NetworkPlan {public String variantId;public VariantPolicy policy;public RunMode mode;public final List<PlanNode> roots=new ArrayList<>();public final Map<String,PlanNode> nodes=new LinkedHashMap<>();public final List<PlanEdge> edges=new ArrayList<>();public final Set<String> unconnected=new LinkedHashSet<>();public double constructionCost,chamberCost,tieInCost,reconstructionCost,chamberReconstructionCost,unconnectedPenalty,newLength,reconstructionLength,calculatedCost,length,score;public ValidationReport validation;public NetworkPlan copyShallow(){NetworkPlan n=new NetworkPlan();n.variantId=variantId;n.policy=policy;n.mode=mode;return n;}}

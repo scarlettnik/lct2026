@@ -1,0 +1,2 @@
+package ru.lct.teplokontur.routing;
+public final class RouteAssessment {public final boolean feasible;public final double multiplier;public final String reason;public RouteAssessment(boolean feasible,double multiplier,String reason){this.feasible=feasible;this.multiplier=multiplier;this.reason=reason;}public static RouteAssessment ok(double m){return new RouteAssessment(true,m,null);}public static RouteAssessment no(String r){return new RouteAssessment(false,Double.POSITIVE_INFINITY,r);}}

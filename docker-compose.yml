@@ -1,0 +1,29 @@
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: teplokontur
+      POSTGRES_USER: teplo
+      POSTGRES_PASSWORD: teplo
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U teplo -d teplokontur"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/teplokontur
+      SPRING_DATASOURCE_USERNAME: teplo
+      SPRING_DATASOURCE_PASSWORD: teplo
+      JAVA_TOOL_OPTIONS: ${JAVA_TOOL_OPTIONS:--Xms256m -Xmx2g}
+    ports: ["${APP_PORT:-8080}:8080"]
+    volumes: ["tmpdata:/tmp/teplokontur"]
+volumes:
+  pgdata: {}
+  tmpdata: {}

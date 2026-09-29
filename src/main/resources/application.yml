@@ -1,0 +1,32 @@
+spring:
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/teplokontur}
+    username: ${SPRING_DATASOURCE_USERNAME:teplo}
+    password: ${SPRING_DATASOURCE_PASSWORD:teplo}
+  jpa:
+    hibernate:
+      ddl-auto: update
+    properties:
+      hibernate.jdbc.batch_size: 200
+      hibernate.order_inserts: true
+  servlet:
+    multipart:
+      # The controller reads the multipart socket stream itself; no servlet spool file.
+      enabled: false
+server:
+  tomcat:
+    max-swallow-size: -1
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+competition:
+  routing:
+    grid-step-m: 3.0
+    corridor-padding-m: 120.0
+    max-expanded-cells: 900000
+    working-set-padding-m: 5000
+  optimizer:
+    beam-width: 24
+    tie-candidates: 8
+    k-paths: 4
+    random-seed: 20260922
