@@ -1,11 +1,11 @@
 {
     "schema_version": 1,
-    "commit": "c188da13b7cb6f284c255a2ad7d1bc925b4b42d3",
-    "indexed_at": "2026-09-29T19:28:25Z",
+    "commit": "4da6da5aaa682ca3dee76d482f7783b7c5ad64d8",
+    "indexed_at": "2026-09-29T20:01:17Z",
     "project": "home-scarlett-Telegram-Desktop-teplokontur_java_with_parity",
-    "nodes": 1765,
-    "edges": 5584,
+    "nodes": 1767,
+    "edges": 5612,
     "original_size": 8388608,
-    "compressed_size": 1134876,
+    "compressed_size": 1141843,
     "compression_level": 3
 }
